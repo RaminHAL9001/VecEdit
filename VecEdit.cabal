@@ -50,27 +50,14 @@ library
 
   build-depends:
       base
-    , bytestring
-    , containers
-    , directory
-    , filepath
     , ieee754
-    , JuicyPixels
-    , JuicyPixels
     , lens
-    , linear
     , MonadRandom
     , mtl
-    , parsers
-    , parsers
     , primitive
-    , process
     , random
     , semigroups
     , text
     , tf-random
-    , time
     , transformers
-    , unix
-    , utf8-string
     , vector
