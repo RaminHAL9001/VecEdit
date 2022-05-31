@@ -16,7 +16,7 @@ library
   hs-source-dirs: src
 
   exposed-modules:
-    VecEdit
+    VecEdit.Print.DisplayInfo
     VecEdit.Table
     VecEdit.Types
     VecEdit.Vector.Editor

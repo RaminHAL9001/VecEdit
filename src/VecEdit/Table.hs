@@ -14,7 +14,7 @@ module VecEdit.Table
 
 import VecEdit.Types (VectorIndex, VectorSize)
 
-import VecEdit.Text.DisplayInfo (DisplayInfo(..), LinePrinter)
+import VecEdit.Print.DisplayInfo (DisplayInfo(..), LinePrinter)
 import VecEdit.Vector.Editor
   ( EditorState, Editor,
     runEditor, currentBuffer, currentCursor, getElemAt, putElemAt,
