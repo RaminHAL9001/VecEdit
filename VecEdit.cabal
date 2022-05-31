@@ -1,0 +1,76 @@
+cabal-version: 1.12
+
+name:               VecEdit
+version:            0.1.0.0
+synopsis:           Monadic utilities for working with mutable vectors
+category:           library, data-structures
+author:             Ramin Honary
+maintainer:         ramin.honary@gmail.com
+copyright:          2022 Ramin Honary, all rights reserved
+license:            AGPL
+build-type:         Simple
+extra-source-files: README.md
+
+library
+  default-language: Haskell2010
+  hs-source-dirs: src
+
+  exposed-modules:
+    VecEdit
+    VecEdit.Table
+    VecEdit.Types
+    VecEdit.Vector.Editor
+    VecEdit.Vector.Editor.GapBuffer
+
+  default-extensions:
+    DataKinds
+    DeriveDataTypeable
+    DeriveFunctor
+    DerivingStrategies
+    ExistentialQuantification
+    FlexibleContexts
+    FlexibleInstances
+    FunctionalDependencies
+    GADTs
+    GeneralizedNewtypeDeriving
+    ImplicitParams
+    LambdaCase
+    MultiParamTypeClasses
+    NoMonomorphismRestriction
+    OverloadedStrings
+    OverloadedLabels
+    PolyKinds
+    RankNTypes
+    ScopedTypeVariables
+    StandaloneDeriving
+    TypeFamilies
+
+  ghc-options:
+    -Wall -fno-warn-name-shadowing -fno-warn-unused-do-bind
+
+  build-depends:
+      base
+    , bytestring
+    , containers
+    , directory
+    , filepath
+    , ieee754
+    , JuicyPixels
+    , JuicyPixels
+    , lens
+    , linear
+    , MonadRandom
+    , mtl
+    , parsers
+    , parsers
+    , primitive
+    , process
+    , random
+    , semigroups
+    , text
+    , tf-random
+    , time
+    , transformers
+    , unix
+    , utf8-string
+    , vector
