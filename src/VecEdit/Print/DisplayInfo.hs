@@ -31,3 +31,4 @@ displayInfoShow p = p . Strict.pack . show
 -- lazy 'Lazy.Text' when buffering to a strict 'Strict.Text'.
 showAsText :: Show a => a -> Lazy.Text
 showAsText = Lazy.pack . show
+
