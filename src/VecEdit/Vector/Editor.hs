@@ -914,19 +914,26 @@ printBuffer a b c = do
 ----------------------------------------------------------------------------------------------------
 
 -- | Search for the first element within the given range of the given buffer that matches the given
--- predicate.
+-- predicate. This function can also perform a fold, which takes the result of the predicate, the
+-- index, and the element as values.
 searchOverIOBufferRange
   :: (MVector mvec e, MonadIO editor)
-  => (e -> editor Bool) -> mvec (PrimState IO) e -> Range -> editor (Maybe VectorIndex)
-searchOverIOBufferRange testElem buf range =
+  => (e -> editor Bool)
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> mvec (PrimState IO) e
+  -> Range
+  -> editor (Maybe VectorIndex, fold)
+searchOverIOBufferRange testElem f fold buf range =
   runContT
   ( callCC $ \ halt ->
     foldOverIOBuffer
-    (\ _ i elem -> do
+    (\ (_, fold) i elem -> do
       wantThis <- lift $ testElem elem
-      if wantThis then halt (Just i) else return Nothing
+      fold <- lift $ f fold wantThis i elem
+      if wantThis then halt (Just i, fold) else return (Nothing, fold)
     )
-    Nothing
+    (Nothing, fold)
     buf
     range
   )
@@ -935,8 +942,13 @@ searchOverIOBufferRange testElem buf range =
 -- | Like 'searchOverIOBufferRange' but over the whole buffer, not just a 'Range'.
 searchOverIOBuffer
   :: (MVector mvec e, MonadIO editor)
-  => (e -> editor Bool) -> mvec (PrimState IO) e -> editor (Maybe VectorIndex)
-searchOverIOBuffer wantThis buf = searchOverIOBufferRange wantThis buf (ioBufferRange buf)
+  => (e -> editor Bool)
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> mvec (PrimState IO) e
+  -> editor (Maybe VectorIndex, fold)
+searchOverIOBuffer wantThis f fold buf =
+  searchOverIOBufferRange wantThis f fold buf (ioBufferRange buf)
 
 -- | Like 'searchOverIOBufferRange' but over the 'currentBuffer'.
 searchBufferRange
@@ -945,10 +957,14 @@ searchBufferRange
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> IO Bool) -> Range -> editor (Maybe VectorIndex)
-searchBufferRange testElem range = do
+  => (e -> editor Bool)
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> Range
+  -> editor (Maybe VectorIndex, fold)
+searchBufferRange testElem f fold range = do
   buf <- use currentBuffer
-  liftIO $ searchOverIOBufferRange testElem buf range
+  searchOverIOBufferRange testElem f fold buf range
 
 -- | Like 'searchBufferRange', but over the entire 'currentBuffer', not just a 'Range'.
 searchBuffer
@@ -957,56 +973,72 @@ searchBuffer
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> IO Bool) -> editor (Maybe VectorIndex)
-searchBuffer testElem =
+  => (e -> editor Bool)
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> editor (Maybe VectorIndex, fold)
+searchBuffer testElem f fold =
   use currentBuffer >>=
-  liftIO . searchOverIOBuffer testElem
+  searchOverIOBuffer testElem f fold
 
 -- | Filters out items that the given predicate does not select by overwriting them with items above
 -- them in the buffer, bubbling down upper elements to overwrite lower elements not selected the
--- predicate. This function returns a 'Range' of elements that were copied to a lower position in
--- the vector but not overwritten and so are duplicate elements. You can ignore these elements, or
--- you can choose to use a function such as 'fillOverIOBuffer' or 'fillWith' to write this range
--- with some null value of @e@.
+-- predicate. Because this function touches every element in the range, a fold is also
+-- performed. The fold receives the current index, the 'Bool' result of the predicate, and the
+-- element.
+--
+-- Along with the fold result, this function returns a 'Range' of elements that were copied to a
+-- lower position in the vector but not overwritten and so are duplicate elements. You can ignore
+-- these elements, or you can choose to use a function such as 'fillOverIOBuffer' or 'fillWith' to
+-- write this range with some null value of @e@.
 filterOverIOBufferRange
   :: (MVector mvec e, MonadIO editor)
   => (e -> editor Bool)
       -- ^ This should return 'False' if the value at the given index is to be overwritten.
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
   -> mvec (PrimState IO) e
   -> Range
-  -> editor Range
-filterOverIOBufferRange testElem buf range =
+  -> editor (Range, fold)
+filterOverIOBufferRange testElem f fold buf range =
   let len = (range ^. rangeLength) in
   let end = (range ^. rangeStart) + len in
-  searchOverIOBufferRange (fmap not . testElem) buf range >>= \ case
-    Nothing    -> return (range & rangeStart .~ end & rangeLength .~ 0)
-    Just start ->
+  -- No elements need to be moved if nothing is deleted, so first find an element that needs to be
+  -- deleted. 
+  searchOverIOBufferRange (fmap not . testElem) f fold buf range >>= \ case
+    (Nothing, fold)    -> return (range & rangeStart .~ end & rangeLength .~ 0, fold)
+    (Just start, fold) ->
       foldOverIOBuffer
-      (\ floor _i elem -> do
+      (\ (floor, fold) i elem -> do
          shouldKeep <- testElem elem
-         if not shouldKeep then return floor else do
+         fold <- f fold shouldKeep i elem
+         if not shouldKeep then return (floor, fold) else do
            liftIO $ GMVec.write buf floor elem
-           return $ floor + 1
+           return (floor + 1, fold)
       )
-      start
+      (start, fold)
       buf
       ( range & -- TODO: handle negative range lengths
         (rangeStart .~ (start + 1)) &
         (rangeLength .~ max 0 (end - start - 1))
-      ) >>= \ last ->
+      ) >>= \ (last, fold) ->
       return
       ( range & -- TODO: handle negative range lengths
         (rangeStart .~ last) &
         (rangeLength .~ max 0 (end - last))
+      , fold
       )
 
 -- | Similar to the 'filterIOBufferRange' function, but sweeps the entire buffer.
 filterOverIOBuffer
   :: (MVector mvec e, MonadIO editor)
   => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
   -> mvec (PrimState IO) e
-  -> editor Range
-filterOverIOBuffer testElem buf = filterOverIOBufferRange testElem buf (ioBufferRange buf)
+  -> editor (Range, fold)
+filterOverIOBuffer testElem f fold buf =
+  filterOverIOBufferRange testElem f fold buf (ioBufferRange buf)
 
 -- | Like 'filterOverIOBufferInRange', but operates on the 'currentBuffer' in an 'Editor' function
 -- context.
@@ -1016,11 +1048,14 @@ filterBufferRange
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> IO Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
-  -> Range -> editor Range
-filterBufferRange testElem range = do
+  => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> Range
+  -> editor (Range, fold)
+filterBufferRange testElem f fold range = do
   buf <- use currentBuffer
-  liftIO $ filterOverIOBufferRange testElem buf range
+  filterOverIOBufferRange testElem f fold buf range
 
 -- | Like 'filterBufferRange', but operates on the entire 'currentBuffer', not just a 'Range'.
 filterBuffer
@@ -1029,11 +1064,13 @@ filterBuffer
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> IO Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
-  -> editor Range
-filterBuffer testElem =
+  => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
+  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  -> fold
+  -> editor (Range, fold)
+filterBuffer testElem f fold =
   use currentBuffer >>=
-  liftIO . filterOverIOBuffer testElem
+  filterOverIOBuffer testElem f fold
 
 ----------------------------------------------------------------------------------------------------
 

@@ -169,8 +169,8 @@ insert label obj = do
     tsiz <- MVec.length <$> use currentBuffer
     -- Check if we are out of space. If so, fist try doing 'bufferCleanup'.
     when (cur >= tsiz) $
-      filterBuffer (pure . isJust) >>=
-      withSubRange (fillWith Nothing)
+      filterBuffer (pure . isJust) (\ () _ _ _ -> pure ()) ()  >>=
+      withSubRange (fillWith Nothing) . fst
     -- If we are still out of space, resize the buffer.
     growBufferWithCursor (\ tsiz _ -> 2 * tsiz)
     putCurrentElem (Just newRow)
@@ -183,8 +183,8 @@ find1
   -> Edit obj (Maybe a)
 find1 testRow onIndex = 
   liftVecEditor $
-  searchBuffer (pure . maybe False testRow) >>=
-  maybe (pure Nothing) onIndex
+  searchBuffer (pure . maybe False testRow) (\ () _ _ _ -> pure ()) () >>=
+  maybe (pure Nothing) onIndex . fst
 
 -- | Search through the 'Table' in the current 'Edit' function context, return the first 'Row'
 -- that satifies the given predicate function.
