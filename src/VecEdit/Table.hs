@@ -8,8 +8,8 @@ module VecEdit.Table
   ( Table, Row, theRowObject, theRowUniqueId, theRowLabel, rowLabel, rowValue,
     Label, RowId(..),
     Edit(..), withinGroup,
-    exec, new, insert, select1, update1, remove1,
-    byRowId, byRowSelf, byRowLabel, byRowValue, list,
+    exec, new, insert, select1, update1, remove1, fold, list,
+    byRowId, byRowSelf, byRowLabel, byRowValue, printRows,
     -- *** Class for lifting 'Edit'
     EditMonad(..),
   ) where
@@ -26,8 +26,6 @@ import VecEdit.Vector.Editor
     growBufferWithCursor,
   )
 
---import Control.Concurrent (ThreadId)
---import Control.Concurrent.MVar (MVar, newMVar, modifyMVar)
 import Control.Lens (Lens', lens, use, (^.), (.~), (.=), (+=))
 import Control.Monad -- re-exporting
 import Control.Monad.IO.Class (MonadIO(liftIO))
@@ -63,7 +61,7 @@ data Table obj
     }
 
 instance DisplayInfo obj => DisplayInfo (Table obj) where
-  displayInfo = fmap void . exec . list
+  displayInfo = fmap void . exec . printRows
    -- The 'void' here discards changes to the 'Table' state, but that is OK since 'list' only
    -- reads the buffer, it never modifies it, so the 'Table' and the 'EditorState' will not end up
    -- in an inconsistent state.
@@ -87,15 +85,16 @@ data Row obj
     }
 
 instance DisplayInfo obj => DisplayInfo (Row obj) where
-  displayInfo putStr (Row{theRowUniqueId=(RowId i),theRowLabel=lbl,theRowObject=obj}) = do
-    putStr $
-      Lazy.toStrict $
-      Lazy.pack $
-      ralign6 i <> ": " <>
-      let str = Strict.take 16 lbl in
-      replicate (16 - Strict.length str) ' ' <>
-      show str
-    displayInfo putStr obj
+  displayInfo putStr (Row{theRowUniqueId=(RowId i),theRowLabel=lbl,theRowObject=obj}) =
+    liftIO $ do
+      putStr $
+        Lazy.toStrict $
+        Lazy.pack $
+        ralign6 i <> ": " <>
+        let str = Strict.take 16 lbl in
+        replicate (16 - Strict.length str) ' ' <>
+        show str
+      displayInfo putStr obj
 
 rowLabel :: Lens' (Row obj) Label
 rowLabel = lens theRowLabel $ \ a b -> a{ theRowLabel = b }
@@ -186,6 +185,22 @@ find1 testRow onIndex =
   searchBuffer (pure . maybe False testRow) (\ () _ _ _ -> pure ()) () >>=
   maybe (pure Nothing) onIndex . fst
 
+-- | Fold over all elements in a 'Table'.
+fold :: (fold -> Row obj -> IO fold) -> fold -> Edit obj fold
+fold f fold = liftVecEditor $ do
+  (dups, fold) <- filterBuffer
+    (pure . isJust)
+    (\ fold _ _ -> liftIO . maybe (pure fold) (f fold))
+    fold
+  withSubRange (fillWith Nothing) dups
+  pure fold
+
+-- | Runs 'fold' with a folding function that builds a list, returns the list.
+list :: (Row obj -> Bool) -> Edit obj [Row obj]
+list p =
+  fmap ($ []) $
+  fold (\ stack row -> pure $ if p row then stack . (row :) else stack) id
+
 -- | Search through the 'Table' in the current 'Edit' function context, return the first 'Row'
 -- that satifies the given predicate function.
 select1 :: (Row obj -> Bool) -> Edit obj (Maybe (Row obj))
@@ -234,8 +249,8 @@ byRowValue = (. theRowObject)
 
 -- | Evaluate a 'LinePrinter' against the 'Table' in the current 'Edit' context. This function
 -- is used to instantiate 'DisplayInfo' for the 'Table' datatype.
-list :: DisplayInfo obj => LinePrinter -> Edit obj ()
-list putStr =
+printRows :: DisplayInfo obj => LinePrinter -> Edit obj ()
+printRows putStr =
   liftVecEditor $
   printBuffer
   (pure . isJust)
