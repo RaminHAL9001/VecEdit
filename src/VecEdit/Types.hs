@@ -7,11 +7,14 @@ module VecEdit.Types
     RelativeIndex, RelativeDirection(..), HasOpposite(..), numToRelativeDirection,
     GaplessIndex(..), GapBufferError(..), GapBufferErrorInfo(..), ppGapBufferErrorInfo,
     -- ** For Text and Strings
+    IndexValue(..),
     CharBufferSize, LineBufferSize, LineIndex(..), CharIndex(..), ToIndex(..), FromIndex(..),
     TextPoint(..), textPointRow, textPointColumn,
     TextRange(..), textRangeStart, textRangeEnd, textRangeIsForward,
     EditTextError(..),
   ) where
+
+import VecEdit.Print.DisplayInfo (DisplayInfo(..), displayInfoShow)
 
 import Control.Arrow ((>>>))
 import Control.Lens (Lens', lens, (^.))
@@ -113,14 +116,14 @@ data GapBufferErrorInfo
     , theErrorCursorAfter  :: !VectorIndex
     , theErrorBufferAlloc  :: !VectorSize
     , theErrorBufferRange  :: !Range
-    , theErrorFunction     :: !GapBufferError
+    , theErrorOperation    :: !GapBufferError
     }
   deriving (Eq, Show)
 
 ppGapBufferErrorInfo :: GapBufferErrorInfo -> Strict.Text
 ppGapBufferErrorInfo info = Strict.pack $ unlines $
   let showInt f = show (f info) in
-  [ show (theErrorFunction info)
+  [ show (theErrorOperation info)
   , "  beforeCursor: " <> showInt theErrorCursorBefore
   , "  afterCursor: " <> showInt theErrorCursorAfter
   , "  length currentBuffer: " <> showInt theErrorBufferAlloc
@@ -152,6 +155,35 @@ data EditTextError
     , editCharMaxBound :: !CharIndex
     } -- ^ Error occurs when an 'EditText' function selects a 'CharIndex' that is out of bounds.
   deriving (Eq, Show)
+
+instance DisplayInfo EditTextError where
+  displayInfo putStr = \ case
+    TextEditUndefined -> putStr "text editor, undefined error"
+    EditTextFailed msg -> putStr msg
+    EditLineError info -> do
+      putStr "edit line error, "
+      putStr $ ppGapBufferErrorInfo info
+    EditTextError info -> do
+      putStr "edit text error, "
+      putStr $ ppGapBufferErrorInfo info
+    EditLineIndexError
+      { editLineInvalidIndex=i
+      , editLineMinBound=minb
+      , editLineMaxBound=maxb
+      } -> do
+        putStr "edit error, requested line " >> displayInfoShow putStr i
+        putStr " out of bounds {min=" >> displayInfoShow putStr minb
+        putStr ", max=" >> displayInfoShow putStr maxb >> putStr "}"
+    EditCharIndexError
+      { editCharOnLine=line
+      , editCharInvalidIndex=i
+      , editCharMinBound=minb
+      , editCharMaxBound=maxb
+      } -> do
+        putStr "edit error, on line " >> displayInfoShow putStr line
+        putStr "column " >> displayInfoShow putStr i
+        putStr " out of bounds {min=" >> displayInfoShow putStr minb
+        putStr ", max=" >> displayInfoShow putStr maxb >> putStr "}"
 
 ----------------------------------------------------------------------------------------------------
 
@@ -187,6 +219,20 @@ instance ToIndex   CharIndex where { toIndex   = CharIndex . (+ 1); }
 
 instance FromIndex LineIndex where { fromIndex (LineIndex i) = i - 1; }
 instance FromIndex CharIndex where { fromIndex (CharIndex i) = i - 1; }
+
+-- | Unwrap or wrap a 'LineIndex', 'CharIndex', or 'GaplessIndex', to the actual 'Int' value stored
+-- __without any conversion__. This should only be used for serialization, deserialization, or error
+-- messages.
+class IndexValue i where { unwrapIndex :: i -> Int; wrapIndex :: Int -> i; } 
+instance IndexValue GaplessIndex where
+  unwrapIndex (GaplessIndex i) = i
+  wrapIndex = GaplessIndex
+instance IndexValue LineIndex where
+  unwrapIndex (LineIndex i) = unwrapIndex i
+  wrapIndex = LineIndex . wrapIndex
+instance IndexValue CharIndex where
+  unwrapIndex (CharIndex i) = unwrapIndex i
+  wrapIndex = CharIndex . wrapIndex
 
 ----------------------------------------------------------------------------------------------------
 

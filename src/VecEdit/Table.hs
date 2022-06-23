@@ -34,9 +34,10 @@ import Control.Monad.State (MonadState(..), StateT, runStateT)
 import Data.Maybe (isJust)
 import Data.Function (on)
 import qualified Data.Vector.Mutable as MVec
+import Data.Vector (Vector)
+import qualified Data.Vector as Vec
 import Data.Vector.Mutable (MVector)
 import qualified Data.Text as Strict
-import qualified Data.Text.Lazy as Lazy
 
 ----------------------------------------------------------------------------------------------------
 
@@ -87,13 +88,7 @@ data Row obj
 instance DisplayInfo obj => DisplayInfo (Row obj) where
   displayInfo putStr (Row{theRowUniqueId=(RowId i),theRowLabel=lbl,theRowObject=obj}) =
     liftIO $ do
-      putStr $
-        Lazy.toStrict $
-        Lazy.pack $
-        ralign6 i <> ": " <>
-        let str = Strict.take 16 lbl in
-        replicate (16 - Strict.length str) ' ' <>
-        show str
+      putStr $ Strict.pack $ ralign6 i <> ": " <> show lbl <> " "
       displayInfo putStr obj
 
 rowLabel :: Lens' (Row obj) Label
@@ -196,10 +191,20 @@ fold f fold = liftVecEditor $ do
   pure fold
 
 -- | Runs 'fold' with a folding function that builds a list, returns the list.
-list :: (Row obj -> Bool) -> Edit obj [Row obj]
+list :: (Row obj -> IO Bool) -> Edit obj (Vector (Row obj))
 list p =
-  fmap ($ []) $
-  fold (\ stack row -> pure $ if p row then stack . (row :) else stack) id
+  uncurry Vec.fromListN .
+  fmap ($ []) <$>
+  flip fold (0, id)
+  (\ (n0, stack) row ->
+    p row >>= \ doesMatch ->
+    pure $
+    if doesMatch then
+      let n = n0 + 1 in
+      seq n $!
+      (n, stack . (row :))
+    else (n0, stack)
+  )
 
 -- | Search through the 'Table' in the current 'Edit' function context, return the first 'Row'
 -- that satifies the given predicate function.

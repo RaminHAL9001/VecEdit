@@ -218,14 +218,14 @@ instance MVector mvec n => MonadError GapBufferError (GapBuffer (mvec :: * -> * 
     , theErrorCursorAfter  = st ^. afterCursor
     , theErrorBufferAlloc  = GMVec.length (st ^. currentBuffer)
     , theErrorBufferRange  = st ^. currentRange
-    , theErrorFunction     = err
+    , theErrorOperation    = err
     }
   catchError (GapBuffer try) catch =
     GapBuffer $
     catchError try $ \ err ->
     unwrapGapBuffer $
     catch $
-    theErrorFunction err
+    theErrorOperation err
 
 -- | Define a new 'GapBufferState' with the specified 'VectorSize', and a @nil@ element @n@ that is
 -- used to erase elements after 'shiftCursor' is evaluated -- this is especially important for
