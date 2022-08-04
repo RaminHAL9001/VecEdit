@@ -1,5 +1,6 @@
 module VecEdit.Print.DisplayInfo
-  ( DisplayInfo(..), LinePrinter, showAsText, displayInfoShow, displayInfoPrint
+  ( DisplayInfo(..), LinePrinter, showAsText, showAsLazyText,
+    displayInfoShow, displayInfoPrint
   ) where
 
 import qualified Data.Text as Strict
@@ -56,3 +57,6 @@ displayInfoPrint = displayInfo Strict.putStr
 showAsText :: Show a => a -> Strict.Text
 showAsText = Strict.pack . show
 
+-- | Like 'showAsText' but constructs a 'Lazy.Text' value.
+showAsLazyText :: Show a => a -> Lazy.Text
+showAsLazyText = Lazy.fromStrict . showAsText
