@@ -4,8 +4,8 @@ module VecEdit.Types
     VectorIndex, VectorSize,
     Range(..), rangeStart, rangeLength, rangeEnd, reverseRange, canonicalRange,
     -- ** For Gap Buffers
-    RelativeIndex, RelativeDirection(..), HasOpposite(..), numToRelativeDirection,
-    GaplessIndex(..), GapBufferError(..), GapBufferErrorInfo(..), ppGapBufferErrorInfo,
+    RelativeIndex, RelativeDirection(..), HasOpposite(..), relativeIndex,
+    GaplessIndex(..), TextPrimOpError(..), GapBufferErrorInfo(..), ppGapBufferErrorInfo,
     -- ** For Text and Strings
     IndexValue(..),
     CharBufferSize, LineBufferSize, LineIndex(..), CharIndex(..), ToIndex(..), FromIndex(..),
@@ -16,7 +16,6 @@ module VecEdit.Types
 
 import VecEdit.Print.DisplayInfo (DisplayInfo(..), displayInfoShow)
 
-import Control.Arrow ((>>>))
 import Control.Lens (Lens', lens, (^.))
 import qualified Data.Text as Strict
 
@@ -91,22 +90,29 @@ instance HasOpposite Bool where { opposite = not; }
 instance HasOpposite RelativeDirection where
   opposite = \ case { Before -> After; After -> Before; }
 
-numToRelativeDirection :: (Num n, Ord n) => n -> Maybe RelativeDirection
-numToRelativeDirection = compare 0 >>> \ case
-  EQ -> Nothing
-  LT -> Just After
-  GT -> Just Before
+-- | Construct a 'RelativeIndex' from a 'RelativeDirection' and a 'VectorIndex'.
+relativeIndex :: RelativeDirection -> VectorIndex -> RelativeIndex
+relativeIndex = \ case
+  Before -> negate . abs
+  After -> abs
 
 ----------------------------------------------------------------------------------------------------
 
 -- | The kind of soft exception that can be thrown by a 'GapBuffer' function.
-data GapBufferError
+data TextPrimOpError
   = StepCursor    !RelativeDirection
   | AtCursor      !RelativeDirection
   | PullItem      !RelativeDirection
   | PopItem       !RelativeDirection
-  | ShiftCursor   !RelativeIndex
+  | ShiftCursor   !RelativeIndex !RelativeIndex
+    -- ^ If the shift is out of bounds, shows the requested shift size and the maximum allowable
+    -- shift size.
   | AtIndex       !GaplessIndex
+  | InsertVector  !RelativeDirection !VectorSize
+    -- ^ The 'VectorSize' is the size of the vector that was requested but failed to be
+    -- inserted. This is thrown when the gap size is not big enough to fit the requsted vector size.
+  | BadCursor     !RelativeDirection !RelativeIndex
+    -- ^ Thrown when one of the 'GapBuffer' 'relativeCursor' values is out of bounds.
   | GapBufferFail !Strict.Text
   deriving (Eq, Show)
 
@@ -116,9 +122,12 @@ data GapBufferErrorInfo
     , theErrorCursorAfter  :: !VectorIndex
     , theErrorBufferAlloc  :: !VectorSize
     , theErrorBufferRange  :: !Range
-    , theErrorOperation    :: !GapBufferError
+    , theErrorOperation    :: !TextPrimOpError
     }
   deriving (Eq, Show)
+
+instance DisplayInfo TextPrimOpError where
+  displayInfo = displayInfoShow
 
 ppGapBufferErrorInfo :: GapBufferErrorInfo -> Strict.Text
 ppGapBufferErrorInfo info = Strict.pack $ unlines $
@@ -137,6 +146,7 @@ data EditTextError
     -- ^ Constructed by the 'empty' instance of the 'Alternative' typeclass.
   | EditTextFailed Strict.Text
     -- ^ Constructed by the 'fail' instance of the 'MonadFail' typeclass
+  | EditorPrimOpError TextPrimOpError
   | EditLineError GapBufferErrorInfo
     -- ^ This is the error re-thrown when a 'GapBuffer' soft exception occurs within an 'EditLine'
     -- function evaluation.
@@ -160,6 +170,7 @@ instance DisplayInfo EditTextError where
   displayInfo putStr = \ case
     TextEditUndefined -> putStr "text editor, undefined error"
     EditTextFailed msg -> putStr msg
+    EditorPrimOpError err -> displayInfo putStr err
     EditLineError info -> do
       putStr "edit line error, "
       putStr $ ppGapBufferErrorInfo info
