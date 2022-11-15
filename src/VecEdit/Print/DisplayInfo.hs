@@ -1,8 +1,10 @@
 module VecEdit.Print.DisplayInfo
   ( DisplayInfo(..), LinePrinter, showAsText, showAsLazyText,
-    displayInfoShow, displayInfoPrint
+    displayInfoShow, displayInfoPrint,
+    ralign6,
   ) where
 
+import Control.Arrow ((>>>))
 import qualified Data.Text as Strict
 import qualified Data.Text.IO as Strict
 import qualified Data.Text.Lazy as Lazy
@@ -60,3 +62,23 @@ showAsText = Strict.pack . show
 -- | Like 'showAsText' but constructs a 'Lazy.Text' value.
 showAsLazyText :: Show a => a -> Lazy.Text
 showAsLazyText = Lazy.fromStrict . showAsText
+
+----------------------------------------------------------------------------------------------------
+
+-- | This function is useful for printing list element numbers (or line numbers) when printing a
+-- list of elements to a console log with each element printed on a single line.
+--
+-- Maximum of 6 base-10 digits indented such that least significant bits align on the right when
+-- printed in a column. The string returned by this function is always at least 6 characters in
+-- length, and can be more if the 'Int' value given is greater or equal to 1,000,000. This is used
+-- for printing indicies for small vectors, so it is reasonable to expect numbers less than
+-- 1,000,000. If you want a more general base-10 'Int' printer, consider using the "Text.Printf"
+-- module instead of this one.
+ralign6 :: Integral i => i -> String
+ralign6 = fromIntegral >>> \ case
+  i | i < 10 -> "     " <> show i
+  i | i < 100 -> "    " <> show i
+  i | i < 1000 -> "   " <> show i
+  i | i < 10000 -> "  " <> show i
+  i | i < 100000 -> " " <> show i
+  i               ->       show (i :: Int)

@@ -5,31 +5,37 @@
 -- this is not a persistent database, it exists only in memory and only for as long as the process
 -- is alive, so things the 'RowId' type is
 module VecEdit.Table
-  ( Table, Row, theRowObject, theRowUniqueId, theRowLabel, rowLabel, rowValue,
+  ( Table, Row, theRowUniqueId, theRowLabel, theRowValue, rowLabel, rowValue, showRow,
     Label, RowId(..),
-    Edit(..), withinGroup,
-    exec, new, insert, select1, update1, remove1, fold, list,
+    Edit(..), withinGroup, exec,
+    -- ** Create and Read
+    new, insert, select1, fold, list,
+    -- *** Row selectors
     byRowId, byRowSelf, byRowLabel, byRowValue, printRows,
-    -- *** Class for lifting 'Edit'
+    -- ** Updating and Delete
+    Update(..),
+    Update1Result(..), update1, remove1,
+    UpdateResult(..), update, remove,
+    -- ** Class for lifting 'Edit'
     EditMonad(..),
   ) where
 
 import VecEdit.Types (VectorIndex, VectorSize)
 
-import VecEdit.Print.DisplayInfo (DisplayInfo(..), LinePrinter)
+import VecEdit.Print.DisplayInfo (DisplayInfo(..), LinePrinter, showAsText, ralign6)
 import VecEdit.Vector.Editor
-  ( EditorState, Editor,
+  ( EditorState, Editor, HasEditorState(..), Update(..),
     runEditor, currentBuffer, currentCursor, getElemAt, putElemAt,
     newEditorState, newCurrentBuffer, withSubRange, fillWith,
-    filterBuffer, searchBuffer, putCurrentElem,
-    printBuffer, ralign6,
+    updateBuffer, searchBuffer, putCurrentElem,
     growBufferWithCursor,
+    printBuffer,
   )
 
-import Control.Lens (Lens', lens, use, (^.), (.~), (.=), (+=))
+import Control.Lens (Lens', lens, use, (.=), (+=))
 import Control.Monad -- re-exporting
 import Control.Monad.IO.Class (MonadIO(liftIO))
-import Control.Monad.State (MonadState(..), StateT, runStateT)
+import Control.Monad.State (MonadState(..), StateT(..), runStateT)
 
 import Data.Maybe (isJust)
 import Data.Function (on)
@@ -61,6 +67,11 @@ data Table obj
     , theTableBuffer :: !(EditorState MVector (Maybe (Row obj)))
     }
 
+instance HasEditorState (Table obj) where
+  type EditorMVectorType (Table obj) = MVector 
+  type EditorMVectorElem (Table obj) = Maybe (Row obj)
+  vectorEditorState = tableBuffer
+
 instance DisplayInfo obj => DisplayInfo (Table obj) where
   displayInfo = fmap void . exec . printRows
    -- The 'void' here discards changes to the 'Table' state, but that is OK since 'list' only
@@ -82,11 +93,11 @@ data Row obj
   = Row
     { theRowUniqueId :: !(RowId obj)
     , theRowLabel    :: !Label
-    , theRowObject   :: !obj
+    , theRowValue   :: !obj
     }
 
 instance DisplayInfo obj => DisplayInfo (Row obj) where
-  displayInfo putStr (Row{theRowUniqueId=(RowId i),theRowLabel=lbl,theRowObject=obj}) =
+  displayInfo putStr (Row{theRowUniqueId=(RowId i),theRowLabel=lbl,theRowValue=obj}) =
     liftIO $ do
       putStr $ Strict.pack $ ralign6 i <> ": " <> show lbl <> " "
       displayInfo putStr obj
@@ -95,7 +106,15 @@ rowLabel :: Lens' (Row obj) Label
 rowLabel = lens theRowLabel $ \ a b -> a{ theRowLabel = b }
 
 rowValue :: Lens' (Row obj) obj
-rowValue = lens theRowObject $ \ a b -> a{ theRowObject = b }
+rowValue = lens theRowValue $ \ a b -> a{ theRowValue = b }
+
+-- | Construct a 'Strict.Text' string that describes the 'Row', showing 'theRowId' and 'theRowLabel'
+-- before appending the 'Strict.Text' value returned by the given function that converts the @obj@
+-- value to a 'Strict.Text' String. It is common to use 'showAsText' for the @(obj ->
+-- 'Strict.Text')@ function type: @('showRow' 'showAsText' ("a String and Int tuple", 42))@
+showRow :: (obj -> Strict.Text) -> Row obj -> Strict.Text
+showRow show Row{theRowUniqueId=RowId{unwrapRowId=rowid},theRowLabel=lbl,theRowValue=obj} =
+  showAsText rowid <> " " <> lbl <> " " <> show obj
 
 ----------------------------------------------------------------------------------------------------
 
@@ -156,36 +175,44 @@ insert label obj = do
         Row
         { theRowUniqueId = RowId newID
         , theRowLabel    = label
-        , theRowObject   = obj
+        , theRowValue    = obj
         }
+  (cur, tsiz) <- liftVecEditor $
+    (,) <$>
+    use currentCursor <*>
+    (MVec.length <$> use currentBuffer)
+  -- Check if we are out of space. If so, fist try doing 'bufferCleanup'.
+  when (cur >= tsiz) $
+    void $ optimize
+  -- If we are still out of space, resize the buffer.
   liftVecEditor $ do
-    cur  <- use currentCursor
-    tsiz <- MVec.length <$> use currentBuffer
-    -- Check if we are out of space. If so, fist try doing 'bufferCleanup'.
-    when (cur >= tsiz) $
-      filterBuffer (pure . isJust) (\ () _ _ _ -> pure ()) ()  >>=
-      withSubRange (fillWith Nothing) . fst
-    -- If we are still out of space, resize the buffer.
-    growBufferWithCursor (\ tsiz _ -> 2 * tsiz)
+    cur <- use currentCursor
+    when (cur >= tsiz) $ 
+      growBufferWithCursor (\ tsiz _ -> 2 * tsiz)
     putCurrentElem (Just newRow)
     currentCursor += 1
-    pure newRow
+  pure newRow
 
 find1
   :: (Row obj -> Bool)
-  -> (VectorIndex -> Editor MVector (Maybe (Row obj)) (Maybe a))
+  -> (VectorIndex -> Editor MVector (Maybe (Row obj)) a)
   -> Edit obj (Maybe a)
 find1 testRow onIndex = 
   liftVecEditor $
   searchBuffer (pure . maybe False testRow) (\ () _ _ _ -> pure ()) () >>=
-  maybe (pure Nothing) onIndex . fst
+  maybe (pure Nothing) (fmap Just . onIndex) . fst
 
 -- | Fold over all elements in a 'Table'.
 fold :: (fold -> Row obj -> IO fold) -> fold -> Edit obj fold
 fold f fold = liftVecEditor $ do
-  (dups, fold) <- filterBuffer
-    (pure . isJust)
-    (\ fold _ _ -> liftIO . maybe (pure fold) (f fold))
+  (dups, fold) <- updateBuffer
+    (\ _i elem fold ->
+      liftIO $
+      maybe
+      (pure (Remove, fold))
+      (fmap ((,) Keep) . f fold)
+      elem
+    )
     fold
   withSubRange (fillWith Nothing) dups
   pure fold
@@ -209,28 +236,139 @@ list p =
 -- | Search through the 'Table' in the current 'Edit' function context, return the first 'Row'
 -- that satifies the given predicate function.
 select1 :: (Row obj -> Bool) -> Edit obj (Maybe (Row obj))
-select1 = fmap join . flip find1 (fmap Just . getElemAt)
+select1 = fmap join . flip find1 getElemAt
 
--- | Search through the 'Table' in the current 'Edit' function context, delete the first 'Row'
--- that satisfies the given predicate function, return 'True' if an element was found and deleted.
-remove1 :: (Row obj -> Bool) -> Edit obj Bool
-remove1 =
-  fmap (maybe False $ const True) .
-  flip find1 (fmap Just . flip putElemAt Nothing)
+----------------------------------------------------------------------------------------------------
 
--- | Update the first 'Row' that matches the given predicate. 
-update1 :: (Row obj -> Bool) -> (obj -> IO obj) -> Edit obj (Maybe (Row obj))
+data UpdateResult = UpdateResult{ manyKept :: !Int, manyRemoved :: !Int, manyUpdated :: !Int }
+  deriving (Eq, Ord, Show)
+
+instance Semigroup UpdateResult where
+  a <> b =
+    UpdateResult
+    { manyKept = manyKept a + manyKept b
+    , manyRemoved = manyRemoved a + manyRemoved b
+    , manyUpdated = manyUpdated a + manyUpdated b
+    }
+
+instance Monoid UpdateResult where
+  mempty = UpdateResult{ manyKept = 0, manyRemoved = 0, manyUpdated = 0 }
+  mappend = (<>)
+
+-- | Update every element in the buffer, possibly deleting the element (by returning 'Nothing'). The
+-- number of elements that were removed is returned as the 'fst' of a tuple, the number of items
+-- changed (as an 'Update' and not merely a 'Keep') is returned as the 'snd' of the tuple. This
+-- function does 'optimize' as it evaluates, so no need to evaluate 'optimize' after evaluating this
+-- function.
+update :: (Row obj -> IO (Update (Row obj))) -> Edit obj UpdateResult
+update f =
+  Edit $
+  updateBuffer
+  (\ _ elem result ->
+    case elem of
+      Nothing   -> pure (Remove, result) -- result not changed, nothing existed here.
+      Just elem ->
+        liftIO $
+        (\ case
+          Remove     ->
+            ( Remove
+            , result{ manyRemoved = manyRemoved result + 1 }
+            )
+          Keep       ->
+            ( Keep
+            , result{ manyKept = manyKept result + 1 }
+            )
+          Update row ->
+            ( Update (Just row)
+            , result{ manyUpdated = manyUpdated result + 1 }
+            )
+        ) <$>
+        f elem
+  )
+  mempty >>= \ (dups, result) ->
+  withSubRange (fillWith Nothing) dups >>
+  pure result
+
+-- | This function is called 'remove' rather than 'delete' because the item is removed from the
+-- 'Table', and not necessarily removed from memory. This function searches through the 'Table' in
+-- the current 'Edit' function context and removes all 'Row's that satisfy the given predicate
+-- function ('True' means to remove, 'False' does NOT remove). Returns the number of elements
+-- removed. This function automatically performs an 'optimze' as it evaluates, so there is no need
+-- to call 'optimize' after evaluating this function.
+remove :: (Row obj -> IO Bool) -> Edit obj Int
+remove p =
+  fmap manyRemoved $
+  update $
+  fmap (\ remove -> if remove then Remove else Keep) . p
+
+----------------------------------------------------------------------------------------------------
+
+data Update1Result obj
+  = NoUpdates
+  | Removed1{ updatedIndex :: Int, removedRow :: Row obj }
+  | Replaced1{ updatedIndex :: Int, removedRow :: Row obj, insertedRow :: Row obj }
+
+-- | This function takes the given predicate and calls 'find1'. If any items matching the predicate
+-- are found, the given updating continuation function (which returns an @'Update' ('Row' obj)@) is
+-- called on only that single found item, updating it in place.
+update1
+  :: (Row obj -> Bool)
+  -> (Row obj -> IO (Update (Row obj)))
+  -> Edit obj (Update1Result obj)
 update1 testRow f =
+  fmap (maybe NoUpdates id) $
   find1 testRow $ \ i ->
   getElemAt i >>=
   maybe
-  (return Nothing)
+  (return NoUpdates)
   (\ row0 ->
-    liftIO (f (row0 ^. rowValue)) >>= \ obj ->
-    let row = Just $ rowValue .~ obj $ row0 in
-    putElemAt i row >>
-    return row
+    liftIO (f row0) >>= \ case
+      Keep       -> pure NoUpdates
+      Remove     -> do
+        putElemAt i Nothing
+        pure Removed1
+          { updatedIndex = i
+          , removedRow = row0
+          }
+      Update row -> do
+        putElemAt i $ Just row
+        pure Replaced1
+          { updatedIndex = i
+          , removedRow = row0
+          , insertedRow = row
+          }
   )
+
+-- | Search through the 'Table' in the current 'Edit' function context, remove the first 'Row' that
+-- satisfies the given predicate function ('True' means to remove, 'False' does NOT remove). This
+-- function is a special kase of 'update1' in which the updating function always returns 'Nothing',
+-- and the only removed element is returned, rather than a tuple containing both the new and removed
+-- element (since there is no new element). This function does not 'optmize', so you may want to
+-- call 'optimize' at some point after evaluating.
+remove1 :: (Row obj -> Bool) -> Edit obj (Update1Result obj)
+remove1 = flip update1 (const $ pure Remove)
+
+-- | Remove any holes in the 'Table' caused by deleting elements, usually through the 'update' or
+-- 'update1' functions. This function is O(n) where n is the size of the table, so be careful about
+-- using it too often. Also, functions like 'remove' perform optimization, so if you 'update' and
+-- then 'remove' it is not necessary to evaluate this function. Returns the number of holes found
+-- and removed. If the number is low, calling this function was probably a waste of computing time,
+-- so ironically, calling this function too often is very sub-optimal.
+optimize :: Edit obj Int
+optimize =
+  Edit $
+  updateBuffer
+  (\ _i e count ->
+    pure $ case e of
+      Nothing -> (Remove, count + 1)
+      Just{}  -> (Keep, count)
+  )
+  0 >>= \ (dups, count) ->
+  (currentCursor += negate count) >>
+  withSubRange (fillWith Nothing) dups >>
+  pure count
+
+----------------------------------------------------------------------------------------------------
 
 -- | A predicate to be used with 'select1'. This is the only way to select a row by 'Int' values of
 -- 'theRowUniqueId', so it is mostly useful in an REPL environment where you have listed out the
@@ -250,7 +388,7 @@ byRowLabel = (. theRowLabel)
 
 -- | Given a predicate on the @obj@ value, construct a predicate to be used with 'select1'.
 byRowValue :: (obj -> Bool) -> (Row obj -> Bool)
-byRowValue = (. theRowObject)
+byRowValue = (. theRowValue)
 
 -- | Evaluate a 'LinePrinter' against the 'Table' in the current 'Edit' context. This function
 -- is used to instantiate 'DisplayInfo' for the 'Table' datatype.

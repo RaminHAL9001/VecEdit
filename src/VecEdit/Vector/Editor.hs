@@ -24,7 +24,6 @@ module VecEdit.Vector.Editor
     printBuffer,
     printOverIOBuffer, printOverBuffer,
     printOverIOBufferRange, printOverBufferRange,
-    ralign6,
 
     -- *** Updating the current cursor
     --
@@ -55,8 +54,8 @@ module VecEdit.Vector.Editor
     -- *** Searching for elements in a buffer
     searchOverIOBufferRange, searchOverIOBuffer, searchBufferRange, searchBuffer,
 
-    -- *** Filtering elements in a buffer
-    filterOverIOBufferRange, filterOverIOBuffer, filterBufferRange, filterBuffer,
+    -- *** Updating elements in a buffer
+    Update(..), updateOverIOBufferRange, updateOverIOBuffer, updateBufferRange, updateBuffer,
 
     -- *** Filling (overwriting) elements to the buffer
     --
@@ -92,6 +91,8 @@ module VecEdit.Vector.Editor
 import VecEdit.Types
   ( VectorIndex, VectorSize, Range(..), rangeStart, rangeLength, rangeEnd, canonicalRange
   )
+
+import VecEdit.Print.DisplayInfo (ralign6)
 
 import Control.Arrow ((***), (>>>))
 import Control.Lens (Lens', lens, use, assign, modifying, (&), (^.), (.~), (.=))
@@ -819,21 +820,6 @@ bufferPrinter foldOver testElem printElem elipsis vec range =
   vec
   range
 
--- | Maximum of 6 base-10 digits indented such that least significant bits align on the right when
--- printed in a column. The string returned by this function is always at least 6 characters in
--- length, and can be more if the 'Int' value given is greater or equal to 1,000,000. This is used
--- for printing indicies for small vectors, so it is reasonable to expect numbers less than
--- 1,000,000. If you want a more general base-10 'Int' printer, consider using the "Text.Printf"
--- module instead of this one.
-ralign6 :: Integral i => i -> String
-ralign6 = fromIntegral >>> \ case
-  i | i < 10 -> "     " <> show i
-  i | i < 100 -> "    " <> show i
-  i | i < 1000 -> "   " <> show i
-  i | i < 10000 -> "  " <> show i
-  i | i < 100000 -> " " <> show i
-  i               ->       show (i :: Int)
-
 -- | Like 'printOverBuffer' but lets you limit the range of elements printed with an additional
 -- 'Range' parameter passed as the final argument.
 printOverBufferRange
@@ -981,96 +967,91 @@ searchBuffer testElem f fold =
   use currentBuffer >>=
   searchOverIOBuffer testElem f fold
 
--- | Filters out items that the given predicate does not select by overwriting them with items above
--- them in the buffer, bubbling down upper elements to overwrite lower elements not selected the
--- predicate. Because this function touches every element in the range, a fold is also
--- performed. The fold receives the current index, the 'Bool' result of the predicate, and the
--- element.
+----------------------------------------------------------------------------------------------------
+
+-- | Used by the 'updateOverIOBufferRange' and related functions.
+data Update e = Keep | Remove | Update e
+  deriving (Eq, Show)
+
+-- | Updates items in place in the buffer, possibly deleting them. Cells in buffer that are deleted
+-- are overwriten with items above them in the buffer, bubbling down upper elements to overwrite
+-- lower elements not selected the predicate. Because this function touches every element in the
+-- range, a fold is also performed. The fold receives the current index, the 'Bool' result of the
+-- predicate, and the element.
 --
 -- Along with the fold result, this function returns a 'Range' of elements that were copied to a
 -- lower position in the vector but not overwritten and so are duplicate elements. You can ignore
 -- these elements, or you can choose to use a function such as 'fillOverIOBuffer' or 'fillWith' to
 -- write this range with some null value of @e@.
-filterOverIOBufferRange
+updateOverIOBufferRange
   :: (MVector mvec e, MonadIO editor)
-  => (e -> editor Bool)
-      -- ^ This should return 'False' if the value at the given index is to be overwritten.
-  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> mvec (PrimState IO) e
   -> Range
   -> editor (Range, fold)
-filterOverIOBufferRange testElem f fold buf range =
+updateOverIOBufferRange testElem fold buf range =
   let len = (range ^. rangeLength) in
   let end = (range ^. rangeStart) + len in
-  -- No elements need to be moved if nothing is deleted, so first find an element that needs to be
-  -- deleted. 
-  searchOverIOBufferRange (fmap not . testElem) f fold buf range >>= \ case
-    (Nothing, fold)    -> return (range & rangeStart .~ end & rangeLength .~ 0, fold)
-    (Just start, fold) ->
-      foldOverIOBuffer
-      (\ (floor, fold) i elem -> do
-         shouldKeep <- testElem elem
-         fold <- f fold shouldKeep i elem
-         if not shouldKeep then return (floor, fold) else do
-           liftIO $ GMVec.write buf floor elem
-           return (floor + 1, fold)
-      )
-      (start, fold)
-      buf
-      ( range & -- TODO: handle negative range lengths
-        (rangeStart .~ (start + 1)) &
-        (rangeLength .~ max 0 (end - start - 1))
-      ) >>= \ (last, fold) ->
-      return
-      ( range & -- TODO: handle negative range lengths
-        (rangeStart .~ last) &
-        (rangeLength .~ max 0 (end - last))
-      , fold
-      )
+  foldOverIOBuffer
+  (\ (floor, fold) i elem -> do
+     (shouldKeep, fold) <- testElem i elem fold
+     case shouldKeep of
+       Remove      -> return (floor, fold)
+       Keep        -> return (floor + 1, fold)
+       Update elem -> do
+         liftIO (GMVec.write buf floor elem)
+         return (floor + 1, fold)
+  )
+  (range ^. rangeStart, fold)
+  buf
+  range >>= \ (last, fold) ->
+  return
+  ( range & -- TODO: handle negative range lengths
+    (rangeStart .~ last) &
+    (rangeLength .~ max 0 (end - last))
+  , fold
+  )
 
--- | Similar to the 'filterIOBufferRange' function, but sweeps the entire buffer.
-filterOverIOBuffer
+-- | Similar to the 'updateIOBufferRange' function, but sweeps the entire buffer.
+updateOverIOBuffer
   :: (MVector mvec e, MonadIO editor)
-  => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
-  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> mvec (PrimState IO) e
   -> editor (Range, fold)
-filterOverIOBuffer testElem f fold buf =
-  filterOverIOBufferRange testElem f fold buf (ioBufferRange buf)
+updateOverIOBuffer testElem fold buf =
+  updateOverIOBufferRange testElem fold buf (ioBufferRange buf)
 
--- | Like 'filterOverIOBufferInRange', but operates on the 'currentBuffer' in an 'Editor' function
+-- | Like 'updateOverIOBufferInRange', but operates on the 'currentBuffer' in an 'Editor' function
 -- context.
-filterBufferRange
+updateBufferRange
   :: ( MonadIO editor, MonadState st editor, HasEditorState st
      , EditorMVectorType st ~ mvec
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
-  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> Range
   -> editor (Range, fold)
-filterBufferRange testElem f fold range = do
+updateBufferRange testElem fold range = do
   buf <- use currentBuffer
-  filterOverIOBufferRange testElem f fold buf range
+  updateOverIOBufferRange testElem fold buf range
 
--- | Like 'filterBufferRange', but operates on the entire 'currentBuffer', not just a 'Range'.
-filterBuffer
+-- | Like 'updateBufferRange', but operates on the entire 'currentBuffer', not just a 'Range'.
+updateBuffer
   :: ( MonadIO editor, MonadState st editor, HasEditorState st
      , EditorMVectorType st ~ mvec
      , EditorMVectorElem st ~ e
      , MVector mvec e
      )
-  => (e -> editor Bool) -- ^ Return 'False' if the value at the given index is to be overwritten.
-  -> (fold -> Bool -> VectorIndex -> e -> editor fold)
+  => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> editor (Range, fold)
-filterBuffer testElem f fold =
+updateBuffer testElem fold =
   use currentBuffer >>=
-  filterOverIOBuffer testElem f fold
+  updateOverIOBuffer testElem fold
 
 ----------------------------------------------------------------------------------------------------
 
