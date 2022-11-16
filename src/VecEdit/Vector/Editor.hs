@@ -89,7 +89,8 @@ module VecEdit.Vector.Editor
   ) where
 
 import VecEdit.Types
-  ( VectorIndex, VectorSize, Range(..), rangeStart, rangeLength, rangeEnd, canonicalRange
+  ( VectorIndex, VectorSize, VectorRange,
+    Range(..), rangeStart, rangeLength, rangeEnd, canonicalizeRange
   )
 
 import VecEdit.Print.DisplayInfo (ralign6)
@@ -229,7 +230,7 @@ data EditorState (mvec :: * -> * -> *) n
       -- ^ A place to store a buffer that you want to work on.
     , theCurrentCursor :: !VectorIndex
       -- ^ A cursor to remember where you want to read or write elements of the current buffer.
-    , theCurrentRange  :: !Range
+    , theCurrentRange  :: !VectorRange
     , theEditorTF      :: !TFGen
       -- ^ A random number generator.
     }
@@ -243,7 +244,7 @@ currentBuffer = vectorEditorState . lens theCurrentBuffer (\ a b -> a{ theCurren
 currentCursor :: (HasEditorState st) => Lens' st VectorIndex
 currentCursor = vectorEditorState . lens theCurrentCursor (\ a b -> a{ theCurrentCursor = b })
 
-currentRange :: (HasEditorState st) => Lens' st Range
+currentRange :: (HasEditorState st) => Lens' st VectorRange
 currentRange = vectorEditorState . lens theCurrentRange (\ a b -> a{ theCurrentRange = b })
 
 editorTFGen :: (HasEditorState st) => Lens' st TFGen
@@ -252,11 +253,11 @@ editorTFGen = vectorEditorState . lens theEditorTF (\ a b -> a{ theEditorTF = b 
 ----------------------------------------------------------------------------------------------------
 
 -- | Get a 'Range' that encompases an entire 'Buffer'.
-bufferRange :: Vector vec n => vec n -> Range
+bufferRange :: Vector vec n => vec n -> VectorRange
 bufferRange = Range 0 . GVec.length
 
 -- | Get a 'Range' that encompases an entire 'IOBuffer'.
-ioBufferRange :: (MVector mvec n) => mvec (PrimState IO) n -> Range
+ioBufferRange :: (MVector mvec n) => mvec (PrimState IO) n -> VectorRange
 ioBufferRange = Range 0 . GMVec.length
 
 -- | Set the 'currentRange' to encompass the entier 'currentBuffer'.
@@ -272,8 +273,8 @@ resetCurrentRange = ioBufferRange <$> use currentBuffer >>= assign currentRange
 -- | Create a new pointer to the 'currentRange' of the 'currentBuffer', producing an 'IOBuffer' that
 -- refers to the original 'currentBuffer' but with a different 'Range' of values. Modifying the
 -- elements in the resultant 'IOBuffer' will also modify the original 'currentBuffer'.
-sliceRange :: MVector mvec n => Range -> mvec st n -> mvec st n
-sliceRange = canonicalRange >>> \ (Range lo len) -> GMVec.slice lo len
+sliceRange :: MVector mvec n => VectorRange -> mvec st n -> mvec st n
+sliceRange = canonicalizeRange >>> \ (Range lo len) -> GMVec.slice lo len
 
 -- | Similar to 'sliceRange', but slices a number of elements from the end of the given buffer. The
 -- 'VectorSize' value given will be the number of elements contained in the new slice.
@@ -285,7 +286,7 @@ sliceFromEnd len vec = GMVec.slice (GMVec.length vec - len) len vec
 -- incremented from the 'rangeStart' until 'rangeLength' number of iterations have occurred. If
 -- 'rangeLength' is negative, the iteration begins at @'rangeStart'@ and decreases until
 -- @'rangeStart' + 'rangeLength'@ is reached. See also 'reverseRange'.
-foldOverRange :: Monad m => (VectorIndex -> fold -> m fold) -> Range -> fold -> m fold
+foldOverRange :: Monad m => (VectorIndex -> fold -> m fold) -> VectorRange -> fold -> m fold
 foldOverRange f (Range lo len) =
   case compare len 0 of
     EQ -> return
@@ -296,14 +297,14 @@ foldOverRange f (Range lo len) =
     loop test step i = if test i lim then f i >=> (loop test step $! step i) else return
 
 -- | Like 'foldOverRange' but purely for side effects, so no @fold@ value is required.
-foldOverRange_ :: Monad m => (VectorIndex -> m ()) -> Range -> m ()
+foldOverRange_ :: Monad m => (VectorIndex -> m ()) -> VectorRange -> m ()
 foldOverRange_ f range = foldOverRange (\ i () -> f i) range ()
 
 -- | Evaluate a given 'Editor' continuation function with a different 'currentRange' value, then
 -- restore the previous range.
 withSubRange
   :: (MonadState st editor, HasEditorState st)
-  => editor a -> Range -> editor a
+  => editor a -> VectorRange -> editor a
 withSubRange f newRange = do
   oldRange <- use currentRange
   currentRange .= newRange
@@ -506,7 +507,7 @@ sliceCurrentBuffer
      , EditorMVectorElem st ~ n
      , MVector mvec n
      )
-  => Range -> editor (mvec (PrimState IO) n)
+  => VectorRange -> editor (mvec (PrimState IO) n)
 sliceCurrentBuffer = (<$> (use currentBuffer)) . sliceRange
 
 -- | Like 'sliceCurrentBuffer' uses the 'currentRange' as the 'Range' of elements to slice.
@@ -579,14 +580,14 @@ freezeCurrentBuffer = liftIO . GVec.freeze
 foldOverIOBuffer
   :: (MVector mvec e, MonadIO m)
   => (fold -> VectorIndex -> e -> m fold)
-  -> fold -> mvec (PrimState IO) e -> Range -> m fold
+  -> fold -> mvec (PrimState IO) e -> VectorRange -> m fold
 foldOverIOBuffer f fold v range =
   foldOverRange (\ i fold -> liftIO (GMVec.read v i) >>= f fold i) range fold
 
 foldOverBuffer
   :: (Vector vec e, Monad m)
   => (fold -> VectorIndex -> e -> m fold)
-  -> fold -> vec e -> Range -> m fold
+  -> fold -> vec e -> VectorRange -> m fold
 foldOverBuffer f fold v range = foldOverRange (\ i fold -> f fold i $ v GVec.! i) range fold
 
 -- | Perform a map over the elements in some 'IOBuffer' (not the 'currentBuffer'). The map
@@ -595,7 +596,7 @@ foldOverBuffer f fold v range = foldOverRange (\ i fold -> f fold i $ v GVec.! i
 mapOverIOBuffer
   :: (MVector mvec e, MonadIO m)
   => (VectorIndex -> e -> m e)
-  -> mvec (PrimState IO) e -> Range -> m ()
+  -> mvec (PrimState IO) e -> VectorRange -> m ()
 mapOverIOBuffer f v =
   foldOverRange_ (\ i -> liftIO (GMVec.read v i) >>= f i >>= liftIO . GMVec.write v i)
 
@@ -627,7 +628,7 @@ mapBuffer f = mapOverIOBuffer f <$> use currentBuffer <*> use currentRange >>= i
 fillOverIOBuffer
   :: (MVector mvec e, MonadIO m)
   => (VectorIndex -> m e)
-  -> mvec (PrimState IO) e -> Range -> m ()
+  -> mvec (PrimState IO) e -> VectorRange -> m ()
 fillOverIOBuffer f v = foldOverRange_ (\ i -> f i >>= liftIO . GMVec.write v i)
 
 -- | Like 'fillOverBuffer' but operates on the 'currentBuffer' and within the 'currentRange'.
@@ -682,7 +683,7 @@ foldFillOverIOBuffer
      , MVector mvec e
      )
   => (VectorIndex -> fold -> editor (e, fold)) -- ^ the "generator"
-  -> mvec (PrimState IO) e -> Range -> fold -> editor fold
+  -> mvec (PrimState IO) e -> VectorRange -> fold -> editor fold
 foldFillOverIOBuffer f v =
   foldOverRange $ \ i ->
   f i >=> uncurry (>>) . (liftIO . GMVec.write v i *** return)
@@ -698,7 +699,7 @@ foldFillOverIOBufferT
      , MVector mvec e, MVector v e
      )
   => (VectorIndex -> StateT fold editor e)
-  -> mvec (PrimState IO) e -> Range -> fold -> editor fold
+  -> mvec (PrimState IO) e -> VectorRange -> fold -> editor fold
 foldFillOverIOBufferT = foldFillOverIOBuffer . fmap runStateT
 
 -- | Like 'foldFillBuffer' but operates on the 'currentRange' of the 'currentBuffer'.
@@ -742,7 +743,7 @@ foldFillBufferT f fold =
 foldMapOverIOBuffer
   :: (MVector mvec e, MonadIO editor)
   => (VectorIndex -> e -> fold -> editor (e, fold)) -- ^ the "generator"
-  -> mvec (PrimState IO) e -> Range -> fold -> editor fold
+  -> mvec (PrimState IO) e -> VectorRange -> fold -> editor fold
 foldMapOverIOBuffer f v =
   foldOverRange $ \ i fold ->
   liftIO (GMVec.read v i) >>= \ e ->
@@ -756,7 +757,7 @@ foldMapOverIOBuffer f v =
 foldMapOverIOBufferT
   :: (MVector mvec e, MonadIO editor)
   => (VectorIndex -> e -> StateT fold editor e)
-  -> mvec (PrimState IO) e -> Range -> fold -> editor fold
+  -> mvec (PrimState IO) e -> VectorRange -> fold -> editor fold
 foldMapOverIOBufferT = foldMapOverIOBuffer . fmap (fmap runStateT)
 
 -- | Like 'foldMapBuffer' but operates on the 'currentRange' of the 'currentBuffer'.
@@ -796,12 +797,12 @@ foldMapBufferT f fold =
 -- Monadic function evaluation context.
 bufferPrinter
   :: Monad m
-  => ((Int -> VectorIndex -> e -> m Int) -> Int -> vec e -> Range -> m Int)
+  => ((Int -> VectorIndex -> e -> m Int) -> Int -> vec e -> VectorRange -> m Int)
   -> (e -> m Bool) -- ^ test if an element is null
   -> (Strict.Text -> e -> m ()) -- ^ print an element
   -> m () -- print an elipsis
   -> vec e
-  -> Range
+  -> VectorRange
   -> m ()
 bufferPrinter foldOver testElem printElem elipsis vec range =
   void $
@@ -828,7 +829,7 @@ printOverBufferRange
   -> (Strict.Text -> e -> editor ()) -- ^ print an element
   -> editor () -- print an elipsis
   -> vec e
-  -> Range
+  -> VectorRange
   -> editor ()
 printOverBufferRange = bufferPrinter foldOverBuffer
 
@@ -852,7 +853,7 @@ printOverIOBufferRange
   -> (Strict.Text -> e -> editor ()) -- ^ print an element
   -> editor () -- print an elipsis
   -> mvec (PrimState IO) e
-  -> Range
+  -> VectorRange
   -> editor ()
 printOverIOBufferRange = bufferPrinter foldOverIOBuffer
 
@@ -908,7 +909,7 @@ searchOverIOBufferRange
   -> (fold -> Bool -> VectorIndex -> e -> editor fold)
   -> fold
   -> mvec (PrimState IO) e
-  -> Range
+  -> VectorRange
   -> editor (Maybe VectorIndex, fold)
 searchOverIOBufferRange testElem f fold buf range =
   runContT
@@ -946,7 +947,7 @@ searchBufferRange
   => (e -> editor Bool)
   -> (fold -> Bool -> VectorIndex -> e -> editor fold)
   -> fold
-  -> Range
+  -> VectorRange
   -> editor (Maybe VectorIndex, fold)
 searchBufferRange testElem f fold range = do
   buf <- use currentBuffer
@@ -988,8 +989,8 @@ updateOverIOBufferRange
   => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> mvec (PrimState IO) e
-  -> Range
-  -> editor (Range, fold)
+  -> VectorRange
+  -> editor (VectorRange, fold)
 updateOverIOBufferRange testElem fold buf range =
   let len = (range ^. rangeLength) in
   let end = (range ^. rangeStart) + len in
@@ -1019,7 +1020,7 @@ updateOverIOBuffer
   => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
   -> mvec (PrimState IO) e
-  -> editor (Range, fold)
+  -> editor (VectorRange, fold)
 updateOverIOBuffer testElem fold buf =
   updateOverIOBufferRange testElem fold buf (ioBufferRange buf)
 
@@ -1033,8 +1034,8 @@ updateBufferRange
      )
   => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
-  -> Range
-  -> editor (Range, fold)
+  -> VectorRange
+  -> editor (VectorRange, fold)
 updateBufferRange testElem fold range = do
   buf <- use currentBuffer
   updateOverIOBufferRange testElem fold buf range
@@ -1048,7 +1049,7 @@ updateBuffer
      )
   => (Int -> e -> fold -> editor (Update e, fold))
   -> fold
-  -> editor (Range, fold)
+  -> editor (VectorRange, fold)
 updateBuffer testElem fold =
   use currentBuffer >>=
   updateOverIOBuffer testElem fold
@@ -1068,7 +1069,7 @@ blitBuffer
      , EditorMVectorElem st ~ n
      , MVector mvec n, Vector vec e
      )
-  => (e -> editor n) -> vec e -> Range -> editor ()
+  => (e -> editor n) -> vec e -> VectorRange -> editor ()
 blitBuffer map buf =
   foldOverRange_ $
   map . (buf GVec.!) >=> putCurrentElem >=> const stepWrap
@@ -1080,7 +1081,7 @@ blitIOBuffer
      , EditorMVectorElem st ~ n
      , MVector vsrc e, MVector vtarg n
      )
-  => (e -> editor n) -> vsrc (PrimState IO) e -> Range -> editor ()
+  => (e -> editor n) -> vsrc (PrimState IO) e -> VectorRange -> editor ()
 blitIOBuffer map buf =
   foldOverRange_ $
   liftIO . GMVec.read buf >=> map >=> putCurrentElem >=> const stepWrap
@@ -1093,7 +1094,7 @@ zipBlitBuffer
      , EditorMVectorElem st ~ n
      , MVector mvec n, Vector vec e
      )
-  => (e -> n -> editor n) -> vec e -> Range -> editor ()
+  => (e -> n -> editor n) -> vec e -> VectorRange -> editor ()
 zipBlitBuffer op buf =
   foldOverRange_ $ \ i ->
   op <$> pure (buf GVec.! i) <*> getCurrentElem >>= id >>=
@@ -1107,7 +1108,7 @@ zipBlitIOBuffer
      , EditorMVectorElem st ~ n
      , MVector vsrc e, MVector vtarg n
      )
-  => (e -> n -> editor n) -> vsrc (PrimState IO) e -> Range -> editor ()
+  => (e -> n -> editor n) -> vsrc (PrimState IO) e -> VectorRange -> editor ()
 zipBlitIOBuffer op buf =
   foldOverRange_ $ \ i ->
   op <$> liftIO (GMVec.read buf i) <*> getCurrentElem >>= id >>=
@@ -1119,7 +1120,7 @@ zipBlitIOBuffer op buf =
 -- | Compute the minimum and maximum bounds for all elements in a given 'Buffer'.
 bufferElemBounds
   :: (Ord e, Bounded e, Vector vec e, Monad editor)
-  => vec e -> Range -> editor (e, e)
+  => vec e -> VectorRange -> editor (e, e)
 bufferElemBounds =
   foldOverBuffer
   (\ (lo, hi) _ e -> return (min lo e, max hi e))
@@ -1128,7 +1129,7 @@ bufferElemBounds =
 -- | Compute the minimum and maximum bounds for all elements in a given 'IOBuffer'.
 ioBufferElemBounds
   :: (Ord e, MVector mvec e, MonadIO editor)
-  => (e, e) -> mvec (PrimState IO) e -> Range -> editor (e, e)
+  => (e, e) -> mvec (PrimState IO) e -> VectorRange -> editor (e, e)
 ioBufferElemBounds = foldOverIOBuffer (\ (lo, hi) _ e -> return (min lo e, max hi e))
 
 -- | Compute the minimum and maximum bounds for all elements in the 'currentRange' of the
@@ -1153,7 +1154,7 @@ normalizeIOBuffer
      , EditorMVectorElem st ~ n
      , MVector mvec e, MVector v n
      )
-  => mvec (PrimState IO) e -> Range -> editor ()
+  => mvec (PrimState IO) e -> VectorRange -> editor ()
 normalizeIOBuffer buf range = do
   (lo, hi) <- ioBufferElemBounds (infinity, negate infinity) buf range
   let scale = recip (hi - lo)

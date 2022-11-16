@@ -40,7 +40,7 @@ module VecEdit.Vector.Editor.GapBuffer
   where
 
 import VecEdit.Types
-  ( Range(..), VectorIndex, VectorSize, canonicalRange, opposite,
+  ( Range(..), VectorIndex, VectorSize, VectorRange, canonicalizeRange, opposite,
     GaplessIndex(..), RelativeIndex, RelativeDirection(..), relativeIndex,
     GapBufferErrorInfo(..), TextPrimOpError(..)
   )
@@ -611,14 +611,14 @@ gapBuffer3Slice = do
 -- one of the slices that would be returned by 'gapBuffer3Slice', an empty slice is returned.
 gapBuffer3SliceInRange
   :: MVector mvec e
-  => Range
+  => VectorRange
   -> GapBuffer mvec e
       ( mvec (PrimState IO) e
       , mvec (PrimState IO) e
       , mvec (PrimState IO) e
       )
 gapBuffer3SliceInRange =
-  canonicalRange >>> \ (Range{theRangeStart=start,theRangeLength=rlen}) ->
+  canonicalizeRange >>> \ (Range{theRangeStart=start,theRangeLength=rlen}) ->
   use beforeCursor >>= \ before ->
   use afterCursor >>= \ after ->
   liftEditor (use currentBuffer) >>= \ buf ->

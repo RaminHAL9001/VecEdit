@@ -2,7 +2,10 @@
 module VecEdit.Types
   ( -- ** For Vectors
     VectorIndex, VectorSize,
-    Range(..), rangeStart, rangeLength, rangeEnd, reverseRange, canonicalRange,
+    Range(..), VectorRange, rangeStart, rangeLength, rangeEnd, reverseRange, canonicalizeRange,
+    Boundary(..), LineBounds, CharBounds, TextBounds,
+    boundaryStart, boundaryEnd, isCanonicalBoundary,
+    boundaryToRange, rangeToBoundary,
     -- ** For Gap Buffers
     RelativeIndex, RelativeDirection(..), HasOpposite(..), relativeIndex,
     GaplessIndex(..), TextPrimOpError(..), GapBufferErrorInfo(..), ppGapBufferErrorInfo,
@@ -10,7 +13,7 @@ module VecEdit.Types
     IndexValue(..),
     CharBufferSize, LineBufferSize, LineIndex(..), CharIndex(..), ToIndex(..), FromIndex(..),
     TextPoint(..), textPointRow, textPointColumn,
-    TextRange(..), textRangeStart, textRangeEnd, textRangeIsForward,
+    Selection(..), SelectLines, SelectText,
     EditTextError(..),
   ) where
 
@@ -34,34 +37,37 @@ type VectorSize = Int
 -- 'mapBuffer' operations. All APIs in this module treat a negative 'rangeLength' value as a valid
 -- 'Range' that will cause folds and map operations to iterate in the reverse direction. A
 -- 'rangeLength' of zero will perform no iteration at all.
-data Range = Range { theRangeStart :: !VectorIndex, theRangeLength :: !VectorSize }
+data Range index = Range { theRangeStart :: !index, theRangeLength :: !RelativeIndex }
   deriving (Eq, Ord, Show)
+
+type VectorRange = Range VectorIndex
 
 -- | The first element of an iteration. The iteration alwas begins here regardless of whether the
 -- 'rangeLength' is negative or positive.
-rangeStart :: Lens' Range VectorIndex
+rangeStart :: Lens' (Range index) index
 rangeStart = lens theRangeStart $ \ a b -> a{ theRangeStart = b }
 
 -- | Compute the top-most index of the 'Range', or bottom-most if 'rangeLength' is negative.
-rangeEnd :: Range -> VectorIndex
+rangeEnd :: (Num index, IndexValue index) => Range index -> index
 rangeEnd Range{theRangeStart=i,theRangeLength=len} =
-  if len < 0 then i - len + 1 else i + len - 1
+  wrapIndex $
+  if len < 0 then unwrapIndex i - len + 1 else unwrapIndex i + len - 1
 
 -- | This may be negative, all APIs in this module should be able to handle a negative length.
-rangeLength :: Lens' Range VectorSize
+rangeLength :: Lens' (Range index) RelativeIndex
 rangeLength = lens theRangeLength $ \ a b -> a{ theRangeLength = b }
 
 -- | Reverses the 'Range' by setting 'rangeStart' equal to @'rangeStart' + 'rangeLength'@ and
 -- 'negate'-ing 'rangeLength'.
-reverseRange :: Range -> Range
+reverseRange :: (Num index, IndexValue index) => Range index -> Range index
 reverseRange r@(Range lo len) = case compare (theRangeLength r) 0 of
-  GT -> Range (lo + len - 1) (negate len)
-  LT -> Range (lo + len + 1) (negate len)
+  GT -> Range (wrapIndex $ unwrapIndex lo + len - 1) (negate len)
+  LT -> Range (wrapIndex $ unwrapIndex lo + len + 1) (negate len)
   EQ -> r
 
 -- | If the 'rangeLength' is negative, evaluate 'rangeReverse'
-canonicalRange :: Range -> Range
-canonicalRange r@(Range _ len) = if len < 0 then reverseRange r else r
+canonicalizeRange :: (Num index, IndexValue index) => Range index -> Range index
+canonicalizeRange r@(Range _ len) = if len < 0 then reverseRange r else r
 
 ----------------------------------------------------------------------------------------------------
 
@@ -121,7 +127,7 @@ data GapBufferErrorInfo
     { theErrorCursorBefore :: !VectorIndex
     , theErrorCursorAfter  :: !VectorIndex
     , theErrorBufferAlloc  :: !VectorSize
-    , theErrorBufferRange  :: !Range
+    , theErrorBufferRange  :: !VectorRange
     , theErrorOperation    :: !TextPrimOpError
     }
   deriving (Eq, Show)
@@ -235,6 +241,9 @@ instance FromIndex CharIndex where { fromIndex (CharIndex i) = i - 1; }
 -- __without any conversion__. This should only be used for serialization, deserialization, or error
 -- messages.
 class IndexValue i where { unwrapIndex :: i -> Int; wrapIndex :: Int -> i; } 
+instance IndexValue Int where
+  unwrapIndex = id
+  wrapIndex = id
 instance IndexValue GaplessIndex where
   unwrapIndex (GaplessIndex i) = i
   wrapIndex = GaplessIndex
@@ -253,7 +262,7 @@ data TextPoint
   { theTextPointRow :: !LineIndex
   , theTextPointColumn :: !CharIndex
   }
-  deriving (Eq, Ord)
+  deriving (Eq, Ord, Show)
 
 instance Bounded TextPoint where
   minBound = TextPoint minBound minBound
@@ -267,26 +276,76 @@ textPointColumn = lens theTextPointColumn $ \ a b -> a{ theTextPointColumn = b }
 
 ----------------------------------------------------------------------------------------------------
 
--- | A data type to delimit text between a starting and ending @index@. The @index@ is polymorphic
--- because you may specify an index in a few different ways.
---   1. by 'LineIndex'
---   2. by 'CharIndex'
---   3. by 'TextPoint' ('LineIndex' and 'CharIndex')
-data TextRange index = TextRange{ theTextRangeStart :: !index, theTextRangeEnd :: !index }
-  deriving (Eq, Ord)
+-- | Like 'Range', but delimited by the __closed set__ (so including the boundary points) of
+-- elements between two specified boundary points.
+data Boundary point
+  = Boundary
+    { theBoundaryStart :: !point
+    , theBoundaryEnd :: !point
+    }
+  deriving (Eq, Ord, Show)
 
-instance Show index => Show (TextRange index) where
-  show (TextRange{theTextRangeStart=start,theTextRangeEnd=end}) = show start <> ".." <> show end
+-- | A range of lines in a text buffer
+type LineBounds = Boundary LineIndex
 
-textRangeStart :: Lens' (TextRange index) index
-textRangeStart = lens theTextRangeStart $ \ a b -> a{ theTextRangeStart = b }
+-- | A range of characters on a single line of text in a text buffer.
+type CharBounds = Boundary CharIndex
 
-textRangeEnd :: Lens' (TextRange index) index
-textRangeEnd = lens theTextRangeEnd $ \ a b -> a{ theTextRangeEnd = b }
+-- | A range of characters delimited by a a pair of 'LineRange' and 'CharRange' tuples.
+type TextBounds = Boundary TextPoint
 
--- | Indicates whether 'theTextRangeStart' is greater than or equal to 'theTextRangeEnd', which
+boundaryStart :: Lens' (Boundary point) point
+boundaryStart = lens theBoundaryStart $ \ a b -> a{ theBoundaryStart = b }
+
+boundaryEnd :: Lens' (Boundary point) point
+boundaryEnd = lens theBoundaryEnd $ \ a b -> a{ theBoundaryEnd = b }
+
+-- | Indicates whether 'Range' is greater than or equal to 'theTextRangeEnd', which
 -- means the range selects lines or characters in an increasing direction. If this function
--- evaluates to 'False' it indicates that the 'TextRange' selects lines or characters in a
+-- evaluates to 'False' it indicates that the 'Boundary' selects lines or characters in a
 -- decreasing direction.
-textRangeIsForward :: Ord n => TextRange n -> Bool
-textRangeIsForward r = (r ^. textRangeStart) <= (r ^. textRangeEnd)
+isCanonicalBoundary :: (Ord index, Num index) => Boundary index -> Bool
+isCanonicalBoundary r = (r ^. boundaryStart) <= (r ^. boundaryEnd)
+
+boundaryToRange :: IndexValue index => Boundary index -> Range index
+boundaryToRange b =
+  Range
+  { theRangeStart  = theBoundaryStart b
+  , theRangeLength =
+      unwrapIndex (theBoundaryEnd b) -
+      unwrapIndex (theBoundaryStart b) + 1
+  }
+
+-- | Might return 'Nothing' if 'theRangeLength' is zero.
+rangeToBoundary :: IndexValue index => Range index -> Maybe (Boundary index)
+rangeToBoundary r =
+  let len = theRangeLength r in
+  if len == 0 then Nothing else Just $
+  Boundary
+  { theBoundaryStart = theRangeStart r
+  , theBoundaryEnd =
+      wrapIndex $
+      unwrapIndex (theRangeStart r) + len
+  }
+
+----------------------------------------------------------------------------------------------------
+
+-- | A data type used to select lines in the buffer, used by 'foldLines' and 'mapLines'.
+data Selection index
+  = All
+    -- ^ Selects all lines in the buffer.
+  | ToFirst
+    -- ^ Selects all lines from the cursor to the first line of the buffer.
+  | ToLast
+    -- ^ Selects all lines from the cursor to the final line of the buffer.
+  | Between !index !index
+    -- ^ Selects all lines between (and including) the given indicies.
+  | BoundedBy (Boundary index)
+  | InRange !(Range index)
+    -- ^ Provide a range value selecting the lines.
+  | FromHere !RelativeIndex
+    -- ^ Select the given number of lines from the cursor. The current line counts as one line.
+  deriving (Eq, Ord, Show)
+
+type SelectLines = Selection LineIndex
+type SelectText = Selection TextPoint
