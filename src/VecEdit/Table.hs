@@ -20,14 +20,14 @@ module VecEdit.Table
     EditMonad(..),
   ) where
 
-import VecEdit.Types (VectorIndex, VectorSize)
+import VecEdit.Types (VectorIndex, VectorSize, Range(..), )
 
 import VecEdit.Print.DisplayInfo (DisplayInfo(..), LinePrinter, showAsText, ralign6)
 import VecEdit.Vector.Editor
   ( EditorState, Editor, HasEditorState(..), Update(..),
     runEditor, currentBuffer, currentCursor, getElemAt, putElemAt,
     newEditorState, newCurrentBuffer, withSubRange, fillWith,
-    updateBuffer, searchBuffer, putCurrentElem,
+    updateBuffer, updateBufferRange, searchBuffer, putCurrentElem,
     growBufferWithCursor,
     printBuffer,
   )
@@ -205,15 +205,21 @@ find1 testRow onIndex =
 -- | Fold over all elements in a 'Table'.
 fold :: (fold -> Row obj -> IO fold) -> fold -> Edit obj fold
 fold f fold = liftVecEditor $ do
-  (dups, fold) <- updateBuffer
+  cur <- use currentCursor
+  (dups, fold) <- updateBufferRange
     (\ _i elem fold ->
       liftIO $
       maybe
-      (pure (Remove, fold))
-      (fmap ((,) Keep) . f fold)
+      (pure (ItemRemove, fold))
+      (fmap ((,) ItemKeep) . f fold)
       elem
     )
     fold
+    ( Range
+      { theRangeStart  = 0
+      , theRangeLength = cur
+      }
+    )
   withSubRange (fillWith Nothing) dups
   pure fold
 
@@ -263,29 +269,35 @@ instance Monoid UpdateResult where
 update :: (Row obj -> IO (Update (Row obj))) -> Edit obj UpdateResult
 update f =
   Edit $
-  updateBuffer
+  use currentCursor >>= \ cur ->
+  updateBufferRange
   (\ _ elem result ->
     case elem of
-      Nothing   -> pure (Remove, result) -- result not changed, nothing existed here.
+      Nothing   -> pure (ItemRemove, result) -- result not changed, nothing existed here.
       Just elem ->
         liftIO $
         (\ case
-          Remove     ->
-            ( Remove
+          ItemRemove     ->
+            ( ItemRemove
             , result{ manyRemoved = manyRemoved result + 1 }
             )
-          Keep       ->
-            ( Keep
+          ItemKeep       ->
+            ( ItemKeep
             , result{ manyKept = manyKept result + 1 }
             )
-          Update row ->
-            ( Update (Just row)
+          ItemUpdate row ->
+            ( ItemUpdate (Just row)
             , result{ manyUpdated = manyUpdated result + 1 }
             )
         ) <$>
         f elem
   )
-  mempty >>= \ (dups, result) ->
+  mempty
+  ( Range
+    { theRangeStart  = 0
+    , theRangeLength = cur
+    }
+  ) >>= \ (dups, result) ->
   withSubRange (fillWith Nothing) dups >>
   pure result
 
@@ -299,7 +311,7 @@ remove :: (Row obj -> IO Bool) -> Edit obj Int
 remove p =
   fmap manyRemoved $
   update $
-  fmap (\ remove -> if remove then Remove else Keep) . p
+  fmap (\ remove -> if remove then ItemRemove else ItemKeep) . p
 
 ----------------------------------------------------------------------------------------------------
 
@@ -323,14 +335,14 @@ update1 testRow f =
   (return NoUpdates)
   (\ row0 ->
     liftIO (f row0) >>= \ case
-      Keep       -> pure NoUpdates
-      Remove     -> do
+      ItemKeep       -> pure NoUpdates
+      ItemRemove     -> do
         putElemAt i Nothing
         pure Removed1
           { updatedIndex = i
           , removedRow = row0
           }
-      Update row -> do
+      ItemUpdate row -> do
         putElemAt i $ Just row
         pure Replaced1
           { updatedIndex = i
@@ -346,7 +358,7 @@ update1 testRow f =
 -- element (since there is no new element). This function does not 'optmize', so you may want to
 -- call 'optimize' at some point after evaluating.
 remove1 :: (Row obj -> Bool) -> Edit obj (Update1Result obj)
-remove1 = flip update1 (const $ pure Remove)
+remove1 = flip update1 (const $ pure ItemRemove)
 
 -- | Remove any holes in the 'Table' caused by deleting elements, usually through the 'update' or
 -- 'update1' functions. This function is O(n) where n is the size of the table, so be careful about
@@ -360,8 +372,8 @@ optimize =
   updateBuffer
   (\ _i e count ->
     pure $ case e of
-      Nothing -> (Remove, count + 1)
-      Just{}  -> (Keep, count)
+      Nothing -> (ItemRemove, count + 1)
+      Just{}  -> (ItemKeep, count)
   )
   0 >>= \ (dups, count) ->
   (currentCursor += negate count) >>

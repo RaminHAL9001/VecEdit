@@ -495,8 +495,8 @@ growBufferWithCursor calcNewSize =
   when (cur >= len) $
   withFullRange $
   newCurrentBuffer (calcNewSize len cur) >>
-  sliceCurrentRange >>= \ new ->
-  liftIO (GMVec.copy new old)
+  use currentBuffer >>= \ new ->
+  liftIO (GMVec.copy (GMVec.slice 0 len new) old)
 
 ----------------------------------------------------------------------------------------------------
 
@@ -971,7 +971,7 @@ searchBuffer testElem f fold =
 ----------------------------------------------------------------------------------------------------
 
 -- | Used by the 'updateOverIOBufferRange' and related functions.
-data Update e = Keep | Remove | Update e
+data Update e = ItemKeep | ItemRemove | ItemUpdate e
   deriving (Eq, Show)
 
 -- | Updates items in place in the buffer, possibly deleting them. Cells in buffer that are deleted
@@ -998,11 +998,14 @@ updateOverIOBufferRange testElem fold buf range =
   (\ (floor, fold) i elem -> do
      (shouldKeep, fold) <- testElem i elem fold
      case shouldKeep of
-       Remove      -> return (floor, fold)
-       Keep        -> return (floor + 1, fold)
-       Update elem -> do
+       ItemRemove      -> return (floor, fold)
+       ItemKeep        -> do
+         when (floor < i) $
+           liftIO $ GMVec.write buf floor elem
+         pure (floor + 1, fold)
+       ItemUpdate elem -> do
          liftIO (GMVec.write buf floor elem)
-         return (floor + 1, fold)
+         pure (floor + 1, fold)
   )
   (range ^. rangeStart, fold)
   buf
