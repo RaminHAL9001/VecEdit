@@ -14,7 +14,7 @@ module VecEdit.Table
     byRowId, byRowSelf, byRowLabel, byRowValue, printRows,
     -- ** Updating and Delete
     Update(..),
-    Update1Result(..), update1, remove1,
+    Update1Result(..), update1, insertByLabel, remove1,
     UpdateResult(..), update, remove,
     showUpdate1Result,
     -- ** Class for lifting 'Edit'
@@ -33,7 +33,7 @@ import VecEdit.Vector.Editor
     printBuffer,
   )
 
-import Control.Lens (Lens', lens, use, (.=), (+=))
+import Control.Lens (Lens', lens, use, (.~), (.=), (+=))
 import Control.Monad -- re-exporting
 import Control.Monad.IO.Class (MonadIO(liftIO))
 import Control.Monad.State (MonadState(..), StateT(..), runStateT)
@@ -166,7 +166,7 @@ new initSize = do
 
 -- | Create a new 'Row' with the given 'Label' and @obj@ values, and insert it into the 'Table'
 -- of the current 'Edit' context.
-insert :: Label -> obj -> Edit obj (Row obj)
+insert :: Label -> obj -> Edit obj (VectorIndex, Row obj)
 insert label obj = do
   newID <-
     Edit $
@@ -192,7 +192,7 @@ insert label obj = do
       growBufferWithCursor (\ tsiz _ -> 2 * tsiz)
     putCurrentElem (Just newRow)
     currentCursor += 1
-  pure newRow
+    pure (cur, newRow)
 
 find1
   :: (Row obj -> Bool)
@@ -320,6 +320,7 @@ data Update1Result obj
   = NoUpdates
   | Removed1{ updatedIndex :: Int, removedRow :: Row obj }
   | Replaced1{ updatedIndex :: Int, removedRow :: Row obj, insertedRow :: Row obj }
+  | Inserted1{ updatedIndex :: Int, insertedRow :: Row obj }
 
 showUpdate1Result :: (obj -> Strict.Text) -> Update1Result obj -> Strict.Text
 showUpdate1Result showObj = \ case
@@ -331,6 +332,9 @@ showUpdate1Result showObj = \ case
     "(replaced :index " <> showAsText i <>
     " :removed " <> showRow showObj remRow <>
     " :inserted " <> showRow showObj insRow <> ")"
+  Inserted1{updatedIndex=i,insertedRow=row} ->
+    "(replaced :index " <> showAsText i <>
+    " :inserted " <> showRow showObj row <> ")"
 
 -- | This function takes the given predicate and calls 'find1'. If any items matching the predicate
 -- are found, the given updating continuation function (which returns an @'Update' ('Row' obj)@) is
@@ -362,6 +366,28 @@ update1 testRow f =
           , insertedRow = row
           }
   )
+
+-- | Given a 'Label' value @lable@ and an @obj@ value @obj@, this function evaluates the expression:
+--
+-- @
+-- 'update1' ('byRowValue' label)
+-- @
+--
+-- and if a 'Row' with the given 'Label' already exists, this row is updated. If the row does not
+-- exist, a new 'Row' is inseted with the 'insert' function, and a new 'Row' with a new unique ID is
+-- created.
+--
+-- Of course, no check is made to ensure that the 'Label' is unique in the 'Table', so the first
+-- element with the given 'Label' will be updated regardless of how many other elements might match
+-- the same 'Label'. But using 'insertByLabel' exclusively while inserting data into the 'Table' is
+-- one way to ensure 'Label's remain unique in the 'Table'.
+insertByLabel :: Label -> obj -> Edit obj (Update1Result obj)
+insertByLabel lbl obj =
+  update1
+  (byRowLabel (== lbl))
+  (pure . ItemUpdate . (rowValue .~ obj)) >>= \ case
+    NoUpdates -> uncurry Inserted1 <$> insert lbl obj
+    result    -> pure result
 
 -- | Search through the 'Table' in the current 'Edit' function context, remove the first 'Row' that
 -- satisfies the given predicate function ('True' means to remove, 'False' does NOT remove). This
