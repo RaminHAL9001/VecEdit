@@ -16,6 +16,7 @@ module VecEdit.Table
     Update(..),
     Update1Result(..), update1, remove1,
     UpdateResult(..), update, remove,
+    showUpdate1Result,
     -- ** Class for lifting 'Edit'
     EditMonad(..),
   ) where
@@ -319,6 +320,17 @@ data Update1Result obj
   = NoUpdates
   | Removed1{ updatedIndex :: Int, removedRow :: Row obj }
   | Replaced1{ updatedIndex :: Int, removedRow :: Row obj, insertedRow :: Row obj }
+
+showUpdate1Result :: (obj -> Strict.Text) -> Update1Result obj -> Strict.Text
+showUpdate1Result showObj = \ case
+  NoUpdates -> "(no updates)"
+  Removed1{updatedIndex=i,removedRow=row} ->
+    "(updated :index " <> showAsText i <>
+    " :removed " <> showRow showObj row <> ")"
+  Replaced1{updatedIndex=i,removedRow=remRow,insertedRow=insRow} ->
+    "(replaced :index " <> showAsText i <>
+    " :removed " <> showRow showObj remRow <>
+    " :inserted " <> showRow showObj insRow <> ")"
 
 -- | This function takes the given predicate and calls 'find1'. If any items matching the predicate
 -- are found, the given updating continuation function (which returns an @'Update' ('Row' obj)@) is
